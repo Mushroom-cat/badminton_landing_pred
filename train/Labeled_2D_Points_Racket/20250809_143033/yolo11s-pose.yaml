@@ -1,0 +1,31 @@
+path: G:\Badminton\Labeled_2D_Points_Racket\20250809_143033
+train: Image
+val: Image_val
+test: Image_val
+kpt_shape:
+- 21
+- 2
+flip_idx:
+- 0
+- 2
+- 1
+- 4
+- 3
+- 6
+- 5
+- 8
+- 7
+- 10
+- 9
+- 12
+- 11
+- 14
+- 13
+- 16
+- 15
+- 17
+- 20
+- 19
+- 18
+names:
+- human

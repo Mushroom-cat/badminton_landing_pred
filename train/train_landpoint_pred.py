@@ -48,7 +48,7 @@ def main():
     
     parser = argparse.ArgumentParser()
     # parser.add_argument('--data_folder', type=str, default='/home/zhaoxuhao/badminton_xh/20250809_Seq_data_v2/20250809_Seq_data')
-    parser.add_argument('--data_folder', type=str, default='datasets/data_1217_ball_ext5')
+    parser.add_argument('--data_folder', type=str, default='datasets/scene1+2')
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--epochs", type=int, default=100)

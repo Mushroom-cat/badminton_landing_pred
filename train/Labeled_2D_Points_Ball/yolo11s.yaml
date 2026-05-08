@@ -1,0 +1,6 @@
+path: G:\Badminton\Labeled_2D_Points_Ball
+train: Image
+val: Image_val
+test: Image_val
+names:
+- badminton

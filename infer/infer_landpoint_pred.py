@@ -140,7 +140,7 @@ def batch_onnx_inference_and_eval(model_path, folder_path, mode='after', skip_n=
 
 # --- 使用示例 ---
 
-data_dir = "datasets/scene1+2"
+data_dir = "datasets/scene1+2"  # datasets/ 目录下的数据集
 # after 模式（直接66维）
 model_path = "./models/ImprovedTransformerModel_20260420_004852.onnx"
 result = batch_onnx_inference_and_eval(model_path, data_dir, mode='after')
