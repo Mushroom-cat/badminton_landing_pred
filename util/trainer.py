@@ -189,18 +189,25 @@ class Trainer:
                                                 torch.tensor(self.train_loader.dataset.label_std))
                 model_with_norm.eval()
 
-                torch.onnx.export(
-                    model_with_norm,
-                    (dummy_seq, dummy_mask),
-                    self.best_model_path.replace('.pt', '.onnx'),
-                    input_names=['seq', 'mask'],
-                    output_names=['xyz', 'var', 'time', 'direction'],
-                    dynamic_axes={"seq": {0: "batch_size", 1: "seq_len", 2: "feature_dim"},
-                                  "mask": {0: "batch_size", 1: "seq_len"}}
-                )
+                onnx_path = self.best_model_path.replace('.pt', '.onnx')
+                try:
+                    torch.onnx.export(
+                        model_with_norm,
+                        (dummy_seq, dummy_mask),
+                        onnx_path,
+                        input_names=['seq', 'mask'],
+                        output_names=['xyz', 'var', 'time', 'direction'],
+                        dynamic_axes={"seq": {0: "batch_size", 1: "seq_len", 2: "feature_dim"},
+                                      "mask": {0: "batch_size", 1: "seq_len"}},
+                        dynamo=False,
+                        opset_version=17,
+                    )
+                    self.logger.info(f"Saved ONNX model to {onnx_path}")
+                except Exception as e:
+                    self.logger.warning(f"ONNX export failed (PyTorch model still saved): {e}")
                 self.model.to(self.device)
 
-                self.logger.info(f"✅ Saved best model to {self.best_model_path}")
+                self.logger.info(f"Saved best model to {self.best_model_path}")
 
         self.logger.info(
             f"Training finished. Best epoch: {best_epoch}|\tBest [Valid] loss: {best_loss:.4f}|\tXYZ Err: {best_xyz_err:.4f}|\tTime Err: {best_time_err:.4f}|\tDir Err: {best_direction_err:.2f}")
