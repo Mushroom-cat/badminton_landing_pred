@@ -10,16 +10,62 @@ from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 
 
-def parse_sample_file(file_path: str, point_num=21) -> Dict:
+DEFAULT_DATASET_FPS = {
+    "20251217_scene1": 245.0,
+    "20260202_scene2": 160.0,
+    "20260418_scene3": 300.0,
+}
+
+
+def _dataset_name_from_folder(folder: str) -> str:
+    return os.path.basename(os.path.normpath(folder))
+
+
+def parse_dataset_fps_values(values=None) -> Dict[str, float]:
+    fps_map = dict(DEFAULT_DATASET_FPS)
+    if not values:
+        return fps_map
+
+    for item in values:
+        if "=" not in item:
+            raise ValueError(f"Invalid dataset fps value: {item}. Expected name=fps")
+        name, fps = item.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError(f"Invalid dataset fps value: {item}. Dataset name is empty")
+        fps_value = float(fps)
+        if fps_value <= 0:
+            raise ValueError(f"Invalid fps for {name}: {fps_value}. FPS must be positive")
+        fps_map[name] = fps_value
+    return fps_map
+
+
+def resolve_dataset_fps(dataset_name: str, dataset_fps=None, required=False):
+    fps_map = DEFAULT_DATASET_FPS if dataset_fps is None else dataset_fps
+    fps = fps_map.get(dataset_name)
+    if fps is None and required:
+        raise ValueError(
+            f"FPS is not configured for dataset '{dataset_name}'. "
+            "Pass --dataset_fps dataset_name=fps."
+        )
+    return fps
+
+
+def parse_sample_file(file_path: str, point_num=22, dataset_name=None, fps=None) -> Dict:
     """
     解析单个样本文件，保留全部帧信息（不裁切）
     返回结构：{
-      'frames': np.array (N, 63),
+      'frames': np.array (N, point_num * 3),
       'frame_ids': np.array (N,),
       'drop_frame': int,
       'label_xyz': np.array (3,)
     }
     """
+    expected_dim = point_num * 3
+    display_name = os.path.basename(file_path)
+    if dataset_name:
+        display_name = f"{dataset_name}/{display_name}"
+
     with open(file_path, 'r') as f:
         lines = [ln.strip() for ln in f if ln.strip()]
 
@@ -39,14 +85,25 @@ def parse_sample_file(file_path: str, point_num=21) -> Dict:
 
     frame_ids = []
     frames = []
+    warned_extra_coords = False
     for ln in lines[:-1]:
         fid_str, coords_str = ln.split(":")
         fid = int(fid_str)
         coords = np.array(list(map(float, coords_str.split(","))), dtype=np.float32)
-        if len(coords) < point_num * 3:
-            print(file_path, fid)
-        if len(coords) != point_num * 3:
-            coords = coords[:point_num*3]
+        if len(coords) < expected_dim:
+            raise ValueError(
+                f"{file_path} frame {fid}: expected {expected_dim} coordinates "
+                f"({point_num} points), got {len(coords)}"
+            )
+        if len(coords) > expected_dim:
+            if not warned_extra_coords:
+                print(
+                    f"Warning: {file_path} has extra coordinates; first seen at frame {fid}. "
+                    f"Expected {expected_dim} coordinates ({point_num} points), got {len(coords)}. "
+                    "Extra coordinates will be truncated."
+                )
+                warned_extra_coords = True
+            coords = coords[:expected_dim]
 
         # ================== 新增：球拍几何合法性检查 (NumPy版) ==================
         # 提取末 4 个关键点 (4, 3)
@@ -74,7 +131,9 @@ def parse_sample_file(file_path: str, point_num=21) -> Dict:
         frames.append(coords)
 
     return {
-        'file_name': os.path.basename(file_path),
+        'file_name': display_name,
+        'source_dataset': dataset_name or _dataset_name_from_folder(os.path.dirname(file_path)),
+        'fps': fps,
         'frames': np.stack(frames, axis=0),
         'frame_ids': np.array(frame_ids, dtype=np.int32),
         'drop_frame': drop_frame,
@@ -82,19 +141,70 @@ def parse_sample_file(file_path: str, point_num=21) -> Dict:
     }
 
 
-def load_all_samples(folder: str, point_num=21, suffix='.txt') -> List[Dict]:
+def load_all_samples(folder: str, point_num=22, suffix='.txt', dataset_name=None, dataset_fps=None) -> List[Dict]:
+    if not os.path.isdir(folder):
+        raise FileNotFoundError(f"数据集目录不存在: {folder}")
+
+    dataset_name = dataset_name or _dataset_name_from_folder(folder)
+    fps = resolve_dataset_fps(dataset_name, dataset_fps, required=False)
     samples = []
     for fn in sorted(os.listdir(folder)):
         if not fn.endswith(suffix):
             continue
         path = os.path.join(folder, fn)
-        try:
-            s = parse_sample_file(path, point_num)
-            if s:
-                samples.append(s)
-        except Exception as e:
-            print(f"跳过 {fn}: {e}")
+        s = parse_sample_file(path, point_num, dataset_name=dataset_name, fps=fps)
+        if s:
+            samples.append(s)
     return samples
+
+
+def load_samples_from_folders(folders: List[str], point_num=22, suffix='.txt', dataset_fps=None) -> List[Dict]:
+    samples = []
+    for folder in folders:
+        samples.extend(load_all_samples(folder, point_num=point_num, suffix=suffix, dataset_fps=dataset_fps))
+    return samples
+
+
+def split_samples_by_dataset(folders: List[str],
+                             point_num=22,
+                             train_ratio=0.8,
+                             suffix='.txt',
+                             dataset_fps=None) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    train_samples = []
+    test_samples = []
+    stats = []
+
+    for folder in folders:
+        dataset_name = _dataset_name_from_folder(folder)
+        samples = load_all_samples(
+            folder,
+            point_num=point_num,
+            suffix=suffix,
+            dataset_name=dataset_name,
+            dataset_fps=dataset_fps,
+        )
+        if len(samples) < 2:
+            raise ValueError(f"数据集 {folder} 至少需要 2 个样本才能按数据集分层划分训练/测试集")
+
+        random.shuffle(samples)
+        split_idx = int(train_ratio * len(samples))
+        split_idx = max(1, min(len(samples) - 1, split_idx))
+
+        train_part = samples[:split_idx]
+        test_part = samples[split_idx:]
+        train_samples.extend(train_part)
+        test_samples.extend(test_part)
+        stats.append({
+            "dataset": dataset_name,
+            "folder": folder,
+            "total": len(samples),
+            "train": len(train_part),
+            "test": len(test_part),
+        })
+
+    random.shuffle(train_samples)
+    random.shuffle(test_samples)
+    return train_samples, test_samples, stats
 
 def collate_fn_dynamic(batch, max_len = None):
     """
@@ -146,6 +256,65 @@ def collate_fn_dynamic(batch, max_len = None):
 
     return seqs_padded, lengths, masks, xyzs, times, dirs, filename
 
+
+def collate_fn_dynamic(batch, max_len=None):
+    has_time_pos = len(batch[0]) == 7
+    if has_time_pos:
+        seqs, lengths, xyzs, times, dirs, time_positions, filename = zip(*batch)
+    else:
+        seqs, lengths, xyzs, times, dirs, filename = zip(*batch)
+        time_positions = None
+
+    lengths = torch.tensor(lengths, dtype=torch.long)
+    feature_dim = seqs[0].shape[1]
+    if max_len is None:
+        max_len = max(lengths)
+
+    seqs_padded = []
+    masks = []
+    time_positions_padded = []
+
+    for idx, (seq, l, fn) in enumerate(zip(seqs, lengths, filename)):
+        pad_len = max_len - l
+        if pad_len > 0:
+            pad = torch.zeros(pad_len, feature_dim, dtype=seq.dtype)
+            seq_padded = torch.cat([pad, seq], dim=0)
+        else:
+            seq_padded = seq
+
+        if has_time_pos:
+            time_pos = time_positions[idx]
+            if pad_len > 0:
+                time_pad = torch.zeros(pad_len, dtype=time_pos.dtype)
+                time_pos_padded = torch.cat([time_pad, time_pos], dim=0)
+            else:
+                time_pos_padded = time_pos
+
+        mask = torch.ones(max_len, dtype=torch.bool)
+        mask[:pad_len] = False
+
+        is_bad_frame = torch.isnan(seq_padded).any(dim=1)
+        if is_bad_frame.any():
+            mask[is_bad_frame] = False
+            seq_padded = torch.nan_to_num(seq_padded, nan=0.0)
+
+        seqs_padded.append(seq_padded)
+        masks.append(mask)
+        if has_time_pos:
+            time_positions_padded.append(time_pos_padded)
+
+    seqs_padded = torch.stack(seqs_padded, dim=0)
+    masks = torch.stack(masks, dim=0)
+    xyzs = torch.stack(xyzs, dim=0)
+    times = torch.stack(times, dim=0)
+    dirs = torch.stack(dirs, dim=0)
+
+    if has_time_pos:
+        time_positions_padded = torch.stack(time_positions_padded, dim=0)
+        return seqs_padded, lengths, masks, xyzs, times, dirs, time_positions_padded, filename
+
+    return seqs_padded, lengths, masks, xyzs, times, dirs, filename
+
 def resampling(samples: List[Dict],
                 num_subsamples: int = 5,
                 min_len: int = 10,
@@ -173,6 +342,9 @@ def resampling(samples: List[Dict],
             start_idx = end_idx - seq_len + 1
 
             sub_sample = {
+                "file_name": s.get("file_name", ""),
+                "source_dataset": s.get("source_dataset", ""),
+                "fps": s.get("fps"),
                 "frames": s["frames"][start_idx:end_idx+1],
                 "frame_ids": s["frame_ids"][start_idx:end_idx+1],
                 "drop_frame": s["drop_frame"],
@@ -203,6 +375,8 @@ def resampling_v2(samples: List[Dict],
         for k in range(num_subsamples):
             sub_sample = {
                 'file_name': s["file_name"],
+                "source_dataset": s.get("source_dataset", ""),
+                "fps": s.get("fps"),
                 "frames": s["frames"],
                 "frame_ids": s["frame_ids"],
                 "drop_frame": s["drop_frame"],
@@ -234,6 +408,9 @@ def down_sampling(samples: List[Dict],
         start_idx = total_len - seq_len + 1
 
         sub_sample = {
+            "file_name": s.get("file_name", ""),
+            "source_dataset": s.get("source_dataset", ""),
+            "fps": s.get("fps"),
             "frames": s["frames"][start_idx:total_len],
             "frame_ids": s["frame_ids"][start_idx:total_len],
             "drop_frame": s["drop_frame"],
@@ -251,7 +428,11 @@ class BadmintonDataset(Dataset):
                  num_subsamples: int = 5, # not use
                  feature_mean=None, feature_std=None,
                  label_mean=None, label_std=None,
-                 aug_method=None):
+                 aug_method=None,
+                 use_time_pos_encoding=False,
+                 time_label_unit="frames",
+                 reference_fps=300.0,
+                 hit_index=100):
         super().__init__()
         assert len(samples) > 0
         self.samples = samples
@@ -262,12 +443,26 @@ class BadmintonDataset(Dataset):
         self.temp_test_offset = temp_test_offset
         self.mode = mode
         self.aug_method = aug_method
+        self.use_time_pos_encoding = use_time_pos_encoding
+        self.time_label_unit = time_label_unit
+        self.reference_fps = float(reference_fps)
+        self.hit_index = hit_index
+
+        if self.time_label_unit not in ("frames", "seconds"):
+            raise ValueError(f"time_label_unit must be 'frames' or 'seconds', got {self.time_label_unit}")
+        if self.use_time_pos_encoding or self.time_label_unit == "seconds":
+            for sample in self.samples:
+                if sample.get("fps") is None:
+                    raise ValueError(
+                        f"Missing fps for sample {sample.get('file_name', '')}. "
+                        "Configure dataset_fps before using time positional encoding or seconds labels."
+                    )
 
 
         if mode == "train":
             # 统计归一化参数（仅初始化时统计一次）
             all_features = np.concatenate([s["frames"] for s in samples], axis=0)
-            all_labels = np.stack([np.concatenate([s["label_xyz"], [s["drop_frame"] - s["frame_ids"][-1]]])
+            all_labels = np.stack([np.concatenate([s["label_xyz"], [self._label_time_value(s, s["frame_ids"][-1])]])
                                     for s in samples], axis=0)
             self.feature_mean = np.nanmean(all_features, axis=0, keepdims=True)
             self.feature_std = np.nanstd(all_features, axis=0, keepdims=True) + 1e-6
@@ -284,6 +479,30 @@ class BadmintonDataset(Dataset):
             self.feature_std = feature_std
             self.label_mean = label_mean
             self.label_std = label_std
+
+    def _sample_fps(self, sample):
+        fps = sample.get("fps")
+        if fps is None:
+            raise ValueError(
+                f"Missing fps for sample {sample.get('file_name', '')}. "
+                "Configure dataset_fps before using time positional encoding or seconds labels."
+            )
+        return float(fps)
+
+    def _label_time_value(self, sample, end_frame_id):
+        frame_delta = float(sample["drop_frame"] - end_frame_id)
+        if self.time_label_unit == "seconds":
+            return frame_delta / self._sample_fps(sample)
+        return frame_delta
+
+    def _time_positions(self, sample, frame_ids):
+        if self.hit_index < 1 or self.hit_index > len(sample["frame_ids"]):
+            raise ValueError(
+                f"hit_index={self.hit_index} is outside sample length {len(sample['frame_ids'])} "
+                f"for {sample.get('file_name', '')}"
+            )
+        hit_frame_id = float(sample["frame_ids"][self.hit_index - 1])
+        return (frame_ids.astype(np.float32) - hit_frame_id) / self._sample_fps(sample)
 
     def __len__(self):
         return len(self.samples)
@@ -322,7 +541,9 @@ class BadmintonDataset(Dataset):
         frame_ids = total_frame_ids[start_idx:end_idx+1]
         length = seq.shape[0]
         label_xyz_raw = torch.tensor(s["label_xyz"], dtype=torch.float32)  # 原始XY轴标签（物理空间）
-        label_time_raw = torch.tensor(drop_frame - frame_ids[-1], dtype=torch.float32)  # 时间标签（暂不加噪声）
+        label_time_raw = torch.tensor(self._label_time_value(s, frame_ids[-1]), dtype=torch.float32)  # 时间标签（暂不加噪声）
+        if self.use_time_pos_encoding:
+            time_pos = torch.from_numpy(self._time_positions(s, frame_ids)).float()
 
         # 方向标签
         direction_vec = label_xyz_raw[:2] - torch.tensor([300.0, 0.0])
@@ -389,6 +610,9 @@ class BadmintonDataset(Dataset):
 
         label_xyz_norm = label_all[:3]
         label_time_norm = label_all[3]
+
+        if self.use_time_pos_encoding:
+            return seq, torch.tensor(length, dtype=torch.long), label_xyz_norm, label_time_norm, direction_unit, time_pos, file_name
 
         return seq, torch.tensor(length, dtype=torch.long), label_xyz_norm, label_time_norm, direction_unit, file_name
 

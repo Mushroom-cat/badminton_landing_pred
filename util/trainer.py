@@ -105,12 +105,52 @@ class Trainer:
 
         self.save_dir = save_dir
         self.best_model_path = os.path.join(self.save_dir, f"{self.model.name}_{self.logger.time}.pt")
+        self.norm_stats_path = self.best_model_path.replace(".pt", "_norm_stats.npz")
         os.makedirs(save_dir, exist_ok=True)
 
         if pretrained_path is not None:
             ckpt = torch.load(pretrained_path, map_location=self.device)
             self.model.load_state_dict(ckpt, strict=False)
             self.logger.info(f"Loaded pretrained model from {pretrained_path}")
+
+    def _unpack_batch(self, batch):
+        if len(batch) == 8:
+            seqs, lengths, masks, labels_xyz, labels_time, labels_direction, time_pos, filenames = batch
+        else:
+            seqs, lengths, masks, labels_xyz, labels_time, labels_direction, filenames = batch
+            time_pos = None
+
+        seqs = seqs.to(self.device)
+        lengths = lengths.to(self.device)
+        masks = masks.to(self.device)
+        labels_xyz = labels_xyz.to(self.device)
+        labels_time = labels_time.to(self.device)
+        labels_direction = labels_direction.to(self.device)
+        if time_pos is not None:
+            time_pos = time_pos.to(self.device)
+
+        return seqs, lengths, masks, labels_xyz, labels_time, labels_direction, time_pos, filenames
+
+    def _model_forward(self, seqs, masks, time_pos=None):
+        if getattr(self.model, "use_time_pos_encoding", False):
+            return self.model(seqs, masks, time_pos)
+        return self.model(seqs, masks)
+
+    def save_norm_stats(self, path=None):
+        path = path or self.best_model_path.replace(".pt", "_norm_stats.npz")
+        dataset = self.train_loader.dataset
+        np.savez(
+            path,
+            feature_mean=dataset.feature_mean,
+            feature_std=dataset.feature_std,
+            label_mean=dataset.label_mean,
+            label_std=dataset.label_std,
+            time_label_unit=np.array(getattr(dataset, "time_label_unit", "frames")),
+            use_time_pos_encoding=np.array(getattr(dataset, "use_time_pos_encoding", False)),
+            reference_fps=np.array(getattr(dataset, "reference_fps", 300.0)),
+        )
+        self.logger.info(f"Saved norm stats to {path}")
+        return path
 
     def cal_xyz_loss(self, pred_xyz, labels_xyz):
         # 1. 计算元素级的 error（向量/张量）
@@ -138,11 +178,10 @@ class Trainer:
             train_loss = 0.0
             # xyz_alpha = (5 - epoch*0.5//10) if epoch <= 30 else 2
             for batch in tqdm(self.train_loader, desc=f"Epoch {epoch + 1}/{num_epochs}"):
-                seqs, lengths, masks, labels_xyz, labels_time, labels_direction = [b.to(self.device) for b in
-                                                                                   batch[:-1]]
+                seqs, lengths, masks, labels_xyz, labels_time, labels_direction, time_pos, _ = self._unpack_batch(batch)
 
                 self.optimizer.zero_grad()
-                pred_xyz, pred_xyz_var, pred_time, pred_direction = self.model(seqs, masks)
+                pred_xyz, pred_xyz_var, pred_time, pred_direction = self._model_forward(seqs, masks, time_pos)
 
                 # loss_xyz = self.cal_xyz_loss(pred_xyz, labels_xyz)
                 loss_xyz = self.regression_criterion_xyz(pred_xyz, pred_xyz_var, labels_xyz)
@@ -175,6 +214,7 @@ class Trainer:
                 best_time_err = avg_time_err
                 best_direction_err = avg_direction_err
                 torch.save(self.model.state_dict(), self.best_model_path)
+                self.save_norm_stats()
 
                 # save model as onnx
                 self.model.to('cpu')
@@ -182,6 +222,7 @@ class Trainer:
                 max_len = self.train_loader.dataset.max_len
                 dummy_seq = torch.randn(1, max_len, feat_dim)
                 dummy_mask = torch.ones(1, max_len, dtype=torch.bool)
+                dummy_time_pos = torch.zeros(1, max_len, dtype=torch.float32)
 
                 model_with_norm = EndToEndModel(self.model, torch.tensor(self.train_loader.dataset.feature_mean),
                                                 torch.tensor(self.train_loader.dataset.feature_std),
@@ -189,22 +230,23 @@ class Trainer:
                                                 torch.tensor(self.train_loader.dataset.label_std))
                 model_with_norm.eval()
 
-                onnx_path = self.best_model_path.replace('.pt', '.onnx')
-                try:
-                    torch.onnx.export(
-                        model_with_norm,
-                        (dummy_seq, dummy_mask),
-                        onnx_path,
-                        input_names=['seq', 'mask'],
-                        output_names=['xyz', 'var', 'time', 'direction'],
-                        dynamic_axes={"seq": {0: "batch_size", 1: "seq_len", 2: "feature_dim"},
-                                      "mask": {0: "batch_size", 1: "seq_len"}},
-                        dynamo=False,
-                        opset_version=17,
-                    )
-                    self.logger.info(f"Saved ONNX model to {onnx_path}")
-                except Exception as e:
-                    self.logger.warning(f"ONNX export failed (PyTorch model still saved): {e}")
+                export_inputs = (dummy_seq, dummy_mask)
+                input_names = ['seq', 'mask']
+                dynamic_axes = {"seq": {0: "batch_size", 1: "seq_len", 2: "feature_dim"},
+                                "mask": {0: "batch_size", 1: "seq_len"}}
+                if getattr(self.model, "use_time_pos_encoding", False):
+                    export_inputs = (dummy_seq, dummy_mask, dummy_time_pos)
+                    input_names = ['seq', 'mask', 'time_pos']
+                    dynamic_axes["time_pos"] = {0: "batch_size", 1: "seq_len"}
+
+                torch.onnx.export(
+                    model_with_norm,
+                    export_inputs,
+                    self.best_model_path.replace('.pt', '.onnx'),
+                    input_names=input_names,
+                    output_names=['xyz', 'var', 'time', 'direction'],
+                    dynamic_axes=dynamic_axes
+                )
                 self.model.to(self.device)
 
                 self.logger.info(f"Saved best model to {self.best_model_path}")
@@ -222,9 +264,8 @@ class Trainer:
 
         with torch.no_grad():
             for batch in self.test_loader:
-                seqs, lengths, masks, labels_xyz, labels_time, labels_direction = [b.to(self.device) for b in
-                                                                                   batch[:-1]]
-                pred_xyz, pred_xyz_var, pred_time, pred_direction = self.model(seqs, masks)
+                seqs, lengths, masks, labels_xyz, labels_time, labels_direction, time_pos, _ = self._unpack_batch(batch)
+                pred_xyz, pred_xyz_var, pred_time, pred_direction = self._model_forward(seqs, masks, time_pos)
 
                 # loss_xyz = self.criterion(pred_xyz, labels_xyz)
                 loss_xyz = self.regression_criterion_xyz(pred_xyz, pred_xyz_var, labels_xyz)
@@ -346,12 +387,10 @@ class Trainer:
 
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc="Testing (Single Pass)"):
-                seqs, lengths, masks, labels_xyz, labels_time, labels_direction = [
-                    b.to(self.device) for b in batch[:-1]
-                ]
+                seqs, lengths, masks, labels_xyz, labels_time, labels_direction, time_pos, fn = self._unpack_batch(batch)
 
                 # 运行模型获取预测
-                output = self.model(seqs, masks)
+                output = self._model_forward(seqs, masks, time_pos)
                 pred_xyz_mu, pred_xyz_log_var, pred_time, pred_direction = output
 
                 # 收集结果
@@ -361,7 +400,6 @@ class Trainer:
                 preds_dir_list.append(pred_direction.cpu().numpy())
 
                 # 收集标签和文件名
-                fn = batch[-1]
                 labels = torch.cat(
                     [labels_xyz, labels_time.unsqueeze(1), labels_direction], dim=-1
                 ).cpu().numpy()

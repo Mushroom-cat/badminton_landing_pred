@@ -2,5 +2,6 @@
 logs/*
 models/*
 results/*
-__pycache__/*
+__pycache__/
 visualization/*
+datasets/*/

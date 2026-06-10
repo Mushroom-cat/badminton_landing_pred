@@ -20,11 +20,14 @@ class EndToEndModel(nn.Module):
         self.register_buffer('label_mean', label_mean)
         self.register_buffer('label_std', label_std)
 
-    def forward(self, sequences, masks):
+    def forward(self, sequences, masks, time_pos=None):
         # 1. 模型原始推理 (输出是归一化的)
         # print('shape', sequences.shape, self.feature_mean.shape, self.feature_std.shape, self.label_mean.shape, self.label_std.shape)
         normalized_sequence = (sequences - self.feature_mean) / self.feature_std
-        normalized_output = self.backbone(normalized_sequence, masks)
+        if getattr(self.backbone, "use_time_pos_encoding", False):
+            normalized_output = self.backbone(normalized_sequence, masks, time_pos)
+        else:
+            normalized_output = self.backbone(normalized_sequence, masks)
         # print('shape2', [i.shape for i in normalized_output])
 
         # 2. 模型内进行反归一化
@@ -545,7 +548,8 @@ class TransformerModel(nn.Module):
 
 
 class ImprovedTransformerModel(nn.Module):
-    def __init__(self, seq_len=100, num_points=21, d_model=1024, nhead=4, num_layers=4, point_dim=3):
+    def __init__(self, seq_len=100, num_points=21, d_model=1024, nhead=4, num_layers=4, point_dim=3,
+                 use_time_pos_encoding=False, reference_fps=300.0):
         super().__init__()
         self.name = 'ImprovedTransformerModel'
         self.num_points = num_points
@@ -553,6 +557,8 @@ class ImprovedTransformerModel(nn.Module):
         self.input_dim = num_points * point_dim
         self.special_input_dim = len(self.special_indices)
         self.d_model = d_model
+        self.use_time_pos_encoding = use_time_pos_encoding
+        self.reference_fps = float(reference_fps)
 
         # self.num_special_points = self.special_input_dim // point_dim
         # self.pe_dim_per_point = 2
@@ -564,7 +570,10 @@ class ImprovedTransformerModel(nn.Module):
         # # 注册为 buffer，它不可训练，但会随模型 state_dict 一起保存和加载
         # self.register_buffer('fixed_point_pe', fixed_point_pe)
 
-        self.pos_encoder = PositionalEncoding(d_model, dropout=0.1, max_len=seq_len)
+        if self.use_time_pos_encoding:
+            self.pos_encoder = TimePositionalEncoding(d_model, dropout=0.1, reference_fps=self.reference_fps)
+        else:
+            self.pos_encoder = PositionalEncoding(d_model, dropout=0.1, max_len=seq_len)
 
         # self.special_input_dim = self.special_input_dim + self.num_special_points * self.pe_dim_per_point  # 12 + 16 = 28
 
@@ -626,7 +635,7 @@ class ImprovedTransformerModel(nn.Module):
         pe = pe.view(1, 1, -1)
         return pe
 
-    def forward(self, x, mask):
+    def forward(self, x, mask, time_pos=None):
         B, T, _ = x.shape
 
         special_x = x[:, :, self.special_indices]  # (B, T, )
@@ -638,8 +647,13 @@ class ImprovedTransformerModel(nn.Module):
 
         special_proj = self.input_fc_special(special_x)  # (B, T, d_model)
 
-        # fixed position encoding
-        special_proj = self.pos_encoder(special_proj)
+        # fixed frame-index PE or real-time PE
+        if self.use_time_pos_encoding:
+            if time_pos is None:
+                raise ValueError("time_pos is required when use_time_pos_encoding=True")
+            special_proj = self.pos_encoder(special_proj, time_pos)
+        else:
+            special_proj = self.pos_encoder(special_proj)
 
         # learnable position encoding
         # position_ids = torch.arange(0, T, dtype=torch.long, device=x.device).unsqueeze(0)  # (1, T)
@@ -656,6 +670,46 @@ class ImprovedTransformerModel(nn.Module):
         output_direction = self.direction_mlp(final)
 
         return output, output_var, output_time, output_direction
+
+
+class ImprovedTransformerTimePEModel(ImprovedTransformerModel):
+    def __init__(self, seq_len=100, num_points=21, d_model=1024, nhead=4, num_layers=4, point_dim=3,
+                 reference_fps=300.0):
+        super().__init__(
+            seq_len=seq_len,
+            num_points=num_points,
+            d_model=d_model,
+            nhead=nhead,
+            num_layers=num_layers,
+            point_dim=point_dim,
+            use_time_pos_encoding=True,
+            reference_fps=reference_fps,
+        )
+        self.name = 'ImprovedTransformerTimePEModel'
+
+
+class TimePositionalEncoding(nn.Module):
+    def __init__(self, d_model: int, dropout: float = 0.1, reference_fps: float = 300.0):
+        super().__init__()
+        self.reference_fps = float(reference_fps)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        self.register_buffer("div_term", div_term)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x, time_pos):
+        if time_pos.dim() != 2:
+            raise ValueError(f"time_pos must have shape (batch, seq_len), got {tuple(time_pos.shape)}")
+        if time_pos.shape[:2] != x.shape[:2]:
+            raise ValueError(
+                f"time_pos shape {tuple(time_pos.shape)} does not match sequence shape {tuple(x.shape[:2])}"
+            )
+
+        positions = time_pos.to(device=x.device, dtype=x.dtype).unsqueeze(-1) * self.reference_fps
+        div_term = self.div_term.to(device=x.device, dtype=x.dtype)
+        pe = torch.zeros_like(x)
+        pe[..., 0::2] = torch.sin(positions * div_term)
+        pe[..., 1::2] = torch.cos(positions * div_term)
+        return self.dropout(x + pe)
 
 
 class PositionalEncoding(nn.Module):
