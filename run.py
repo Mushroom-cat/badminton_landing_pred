@@ -9,7 +9,7 @@ from datetime import datetime
 import numpy as np
 import torch
 
-from util.dataset import load_all_samples, BadmintonDataset
+from util.dataset import BadmintonDataset, split_samples_by_dataset
 from util.model import ImprovedTransformerModel
 from util.trainer import Trainer
 from analysis.visual_csv import visual_df
@@ -125,8 +125,10 @@ def parse_train_args():
 
     # 数据参数
     parser.add_argument('--data_folder', type=str, default='datasets/scene1+2',
-                        help="训练数据集路径")
-    parser.add_argument("--points_num", type=int, default=21,
+                        help="训练数据集路径；未设置 --data_folders 时使用")
+    parser.add_argument('--data_folders', type=str, nargs='+', default=None,
+                        help="多个训练数据集路径；若提供则忽略 --data_folder")
+    parser.add_argument("--points_num", type=int, default=22,
                         help="关键点数量")
     parser.add_argument("--min_len", type=int, default=10,
                         help="最小序列长度")
@@ -183,15 +185,18 @@ def step2_load_data(args, logger):
     logger.info("=" * 40)
 
     set_seed()
-    samples = load_all_samples(args.data_folder, args.points_num)
-    random.shuffle(samples)
-    logger.info(f"共加载 {len(samples)} 个样本")
+    data_folders = args.data_folders if args.data_folders else [args.data_folder]
+    logger.info(f"使用数据集目录: {data_folders}")
 
-    # 80/20 划分
-    split_idx = int(0.8 * len(samples))
-    train_samples = samples[:split_idx]
-    test_samples = samples[split_idx:]
-    logger.info(f"训练样本: {len(train_samples)}, 测试样本: {len(test_samples)}")
+    train_samples, test_samples, dataset_stats = split_samples_by_dataset(
+        data_folders, point_num=args.points_num, train_ratio=0.8
+    )
+    for stat in dataset_stats:
+        logger.info(
+            f"数据集 {stat['dataset']} ({stat['folder']}): "
+            f"总样本 {stat['total']}, 训练 {stat['train']}, 测试 {stat['test']}"
+        )
+    logger.info(f"合并后训练样本: {len(train_samples)}, 测试样本: {len(test_samples)}")
 
     return train_samples, test_samples
 

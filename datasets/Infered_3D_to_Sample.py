@@ -117,8 +117,8 @@ def merge_ball_data_to_label(label_folder, ball_folder, output_folder):
                 new_line = f"{frame_part}:{content_part.strip()},{coord}"
                 processed_lines.append(new_line)
             # 保留最后一行（落点坐标）
-            # processed_lines.append(lines[-1])
-            processed_lines.append("001151:92.789,-191.782,-3.46435")
+            processed_lines.append(lines[-1])
+            # processed_lines.append("001151:92.789,-191.782,-3.46435")
 
             # 将处理后的数据写入新文件夹
             with open(output_file_path, "w", encoding="utf-8") as f_output:
@@ -135,9 +135,9 @@ def merge_ball_data_to_label(label_folder, ball_folder, output_folder):
 
 # -------------------------- 统一配置区（只需修改这里） --------------------------
 # 请根据实际路径修改以下配置
-LABEL_FOLDER = "../Infered_3D_Points_Racket/test"  # label文件夹路径
-BALL_FOLDER = "../Infered_3D_Points_Ball/test"  # ball文件夹路径（需要重命名的文件夹）
-OUTPUT_FOLDER = "./test"  # 合并后文件的输出路径
+LABEL_FOLDER = "20260418_label_ds_3d_pose"  # label文件夹路径
+BALL_FOLDER = "20260418_label_ds_3d_det"  # ball文件夹路径（需要重命名的文件夹）
+OUTPUT_FOLDER = "./scene3"  # 合并后文件的输出路径
 # ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
