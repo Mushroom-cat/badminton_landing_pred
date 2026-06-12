@@ -7,7 +7,7 @@ import numpy as np
 from scipy.optimize import OptimizeWarning, brentq, curve_fit
 
 
-DEFAULT_INPUT = Path(__file__).with_name("trajectory.txt")
+DEFAULT_INPUT = Path(__file__).with_name("trajectories")
 DEFAULT_FPS = 300.0
 DEFAULT_LANDING_Z = 0.0
 DEFAULT_WINDOW_SIZE = 40
@@ -264,6 +264,135 @@ def run_sliding_windows(input_path, fps, landing_z, window_size):
         "window_size": window_size,
         "rows": rows,
     }
+
+def run_batch(input_dir, fps, landing_z, sliding=False, window_size=40):
+    input_dir = Path(input_dir)
+
+    if not input_dir.exists():
+        raise ValueError(f"Input directory does not exist: {input_dir}")
+
+    txt_files = sorted(input_dir.glob("*.txt"))
+
+    if not txt_files:
+        raise ValueError(f"No txt files found in: {input_dir}")
+
+    results = []
+
+    for txt_file in txt_files:
+        print(f"\nProcessing: {txt_file.name}")
+
+        try:
+            if sliding:
+                result = run_sliding_windows(
+                    txt_file,
+                    fps,
+                    landing_z,
+                    window_size,
+                )
+
+                ok_rows = [
+                    row for row in result["rows"]
+                    if row["status"] == "ok"
+                ]
+
+                if not ok_rows:
+                    print("  No successful sliding-window result")
+                    continue
+
+                best_row = min(ok_rows, key=lambda row: row["xy_error"])
+                last_row = ok_rows[-1]
+
+                best_xy_error = best_row["xy_error"]
+                best_xyz_error = best_row["xyz_error"]
+
+                last_xy_error = last_row["xy_error"]
+                last_xyz_error = last_row["xyz_error"]
+
+                print(
+                    f"  best window xy_error  = {best_xy_error:.6f}"
+                )
+                print(
+                    f"  best window xyz_error = {best_xyz_error:.6f}"
+                )
+
+                print(
+                    f"  last window xy_error  = {last_xy_error:.6f}"
+                )
+                print(
+                    f"  last window xyz_error = {last_xyz_error:.6f}"
+                )
+
+                results.append({
+                    "file": txt_file.name,
+
+                    "best_xy_error": best_xy_error,
+                    "best_xyz_error": best_xyz_error,
+
+                    "last_xy_error": last_xy_error,
+                    "last_xyz_error": last_xyz_error,
+                })
+
+            else:
+                result = run(txt_file, fps, landing_z)
+
+                xy_error = result["xy_error"]
+                xyz_error = result["xyz_error"]
+
+                print(f"  xy_error  = {xy_error:.6f}")
+                print(f"  xyz_error = {xyz_error:.6f}")
+
+                results.append({
+                    "file": txt_file.name,
+                    "xy_error": xy_error,
+                    "xyz_error": xyz_error,
+                })
+
+        except Exception as exc:
+            print(f"  Failed: {exc}")
+
+    if not results:
+        raise ValueError("No valid results")
+
+    print("\n==============================")
+    print("Batch Evaluation Result")
+    print("==============================")
+    print(f"total files: {len(results)}")
+
+    if sliding:
+        avg_best_xy = np.mean([r["best_xy_error"] for r in results])
+        avg_best_xyz = np.mean([r["best_xyz_error"] for r in results])
+
+        avg_last_xy = np.mean([r["last_xy_error"] for r in results])
+        avg_last_xyz = np.mean([r["last_xyz_error"] for r in results])
+
+        print(f"average BEST xy_error  = {avg_best_xy:.6f}")
+        print(f"average BEST xyz_error = {avg_best_xyz:.6f}")
+
+        print(f"average LAST xy_error  = {avg_last_xy:.6f}")
+        print(f"average LAST xyz_error = {avg_last_xyz:.6f}")
+
+        return {
+            "results": results,
+
+            "average_best_xy_error": avg_best_xy,
+            "average_best_xyz_error": avg_best_xyz,
+
+            "average_last_xy_error": avg_last_xy,
+            "average_last_xyz_error": avg_last_xyz,
+        }
+
+    else:
+        avg_xy = np.mean([r["xy_error"] for r in results])
+        avg_xyz = np.mean([r["xyz_error"] for r in results])
+
+        print(f"average xy_error  = {avg_xy:.6f}")
+        print(f"average xyz_error = {avg_xyz:.6f}")
+
+        return {
+            "results": results,
+            "average_xy_error": avg_xy,
+            "average_xyz_error": avg_xyz,
+        }
 
 
 def write_sliding_csv(rows, output_path):
@@ -537,7 +666,7 @@ def parse_args():
         "--input",
         type=Path,
         default=DEFAULT_INPUT,
-        help=f"Trajectory file path. Default: {DEFAULT_INPUT}",
+        help=f"Trajectory directory path. Default: {DEFAULT_INPUT}",
     )
     parser.add_argument(
         "--fps",
@@ -591,22 +720,14 @@ def parse_args():
 
 def main():
     args = parse_args()
-    if args.sliding:
-        result = run_sliding_windows(args.input, args.fps, args.landing_z, args.window_size)
-        write_sliding_csv(result["rows"], args.csv_output)
-        plot_sliding_result(result, args.plot_output)
-        make_sliding_gif(result, args.gif_output, args.gif_fps)
-        print_sliding_result(
-            result,
-            args.fps,
-            args.landing_z,
-            args.csv_output,
-            args.plot_output,
-            args.gif_output,
-        )
-    else:
-        result = run(args.input, args.fps, args.landing_z)
-        print_result(result, args.fps, args.landing_z)
+
+    run_batch(
+        input_dir=args.input,
+        fps=args.fps,
+        landing_z=args.landing_z,
+        sliding=args.sliding,
+        window_size=args.window_size,
+    )
 
 
 if __name__ == "__main__":
