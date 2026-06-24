@@ -324,11 +324,24 @@ def run_sliding_windows(input_path, fps, landing_z, window_size):
         "rows": rows,
     }
 
-def run_batch(input_dir, fps, landing_z, sliding=False, window_size=40):
+def run_batch(
+    input_dir,
+    fps,
+    landing_z,
+    sliding=False,
+    window_size=40,
+    parameter_mode="curve-fit",
+    predictor=None,
+    state_window_size=DEFAULT_STATE_WINDOW_SIZE,
+):
     input_dir = Path(input_dir)
 
     if not input_dir.exists():
         raise ValueError(f"Input directory does not exist: {input_dir}")
+    if not input_dir.is_dir():
+        raise ValueError(f"Batch input must be a directory: {input_dir}")
+    if parameter_mode == "mlp" and predictor is None:
+        raise ValueError("MLP batch mode requires a loaded predictor")
 
     txt_files = sorted(input_dir.glob("*.txt"))
 
@@ -342,12 +355,21 @@ def run_batch(input_dir, fps, landing_z, sliding=False, window_size=40):
 
         try:
             if sliding:
-                result = run_sliding_windows(
-                    txt_file,
-                    fps,
-                    landing_z,
-                    window_size,
-                )
+                if parameter_mode == "mlp":
+                    result = run_mlp_sliding(
+                        txt_file,
+                        fps,
+                        landing_z,
+                        state_window_size,
+                        predictor,
+                    )
+                else:
+                    result = run_sliding_windows(
+                        txt_file,
+                        fps,
+                        landing_z,
+                        window_size,
+                    )
 
                 ok_rows = [
                     row for row in result["rows"]
@@ -392,7 +414,16 @@ def run_batch(input_dir, fps, landing_z, sliding=False, window_size=40):
                 })
 
             else:
-                result = run(txt_file, fps, landing_z)
+                if parameter_mode == "mlp":
+                    result = run_mlp(
+                        txt_file,
+                        fps,
+                        landing_z,
+                        predictor,
+                        state_window_size,
+                    )
+                else:
+                    result = run(txt_file, fps, landing_z)
 
                 xy_error = result["xy_error"]
                 xyz_error = result["xyz_error"]
@@ -415,6 +446,7 @@ def run_batch(input_dir, fps, landing_z, sliding=False, window_size=40):
     print("\n==============================")
     print("Batch Evaluation Result")
     print("==============================")
+    print(f"parameter_mode: {parameter_mode}")
     print(f"total files: {len(results)}")
 
     if sliding:
@@ -857,7 +889,7 @@ def parse_args():
         "--input",
         type=Path,
         default=DEFAULT_INPUT,
-        help=f"Trajectory directory path. Default: {DEFAULT_INPUT}",
+        help=f"Trajectory file or directory path. Default: {DEFAULT_INPUT}",
     )
     parser.add_argument(
         "--fps",
@@ -930,6 +962,21 @@ def main():
                 f"but inference uses {args.fps:g} FPS.",
                 RuntimeWarning,
             )
+
+    if not args.input.exists():
+        raise ValueError(f"Input path does not exist: {args.input}")
+    if args.input.is_dir():
+        run_batch(
+            args.input,
+            args.fps,
+            args.landing_z,
+            sliding=args.sliding,
+            window_size=args.window_size,
+            parameter_mode=args.parameter_mode,
+            predictor=predictor,
+            state_window_size=args.state_window_size,
+        )
+        return
 
     if args.sliding:
         if args.parameter_mode == "mlp":
