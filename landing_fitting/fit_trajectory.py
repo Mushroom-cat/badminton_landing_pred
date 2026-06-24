@@ -6,8 +6,23 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import OptimizeWarning, brentq, curve_fit
 
+try:
+    from trajectory_mlp import (
+        CParameterPredictor,
+        DEFAULT_STATE_WINDOW_SIZE,
+        load_trajectory_file,
+        predict_hybrid_parameters,
+    )
+except ModuleNotFoundError:
+    from .trajectory_mlp import (
+        CParameterPredictor,
+        DEFAULT_STATE_WINDOW_SIZE,
+        load_trajectory_file,
+        predict_hybrid_parameters,
+    )
 
-DEFAULT_INPUT = Path(__file__).with_name("trajectories")
+DEFAULT_INPUT = Path(__file__).with_name("trajectory.txt")
+DEFAULT_MLP_MODEL = Path(__file__).parents[1] / "models" / "c_parameter_mlp.pt"
 DEFAULT_FPS = 300.0
 DEFAULT_LANDING_Z = 0.0
 DEFAULT_WINDOW_SIZE = 40
@@ -160,6 +175,8 @@ def solve_landing_time(params, landing_z):
 
 def assert_finite_result(result):
     for key, value in result.items():
+        if isinstance(value, str):
+            continue
         array = np.asarray(value, dtype=np.float64)
         if not np.all(np.isfinite(array)):
             raise ValueError(f"Result field {key!r} contains non-finite values: {value}")
@@ -179,6 +196,7 @@ def run(input_path, fps, landing_z):
     xyz_error = float(np.linalg.norm(predicted - label))
 
     result = {
+        "parameter_mode": "curve-fit",
         "observed_points": len(observed),
         "label": label,
         "predicted": predicted,
@@ -188,6 +206,39 @@ def run(input_path, fps, landing_z):
         "x_params": params["x"],
         "y_params": params["y"],
         "z_params": params["z"],
+        "c_values": np.asarray(
+            [params["x"][2], params["y"][2], params["z"][2]],
+            dtype=np.float64,
+        ),
+    }
+    assert_finite_result(result)
+    return result
+
+
+def run_mlp(input_path, fps, landing_z, predictor, state_window_size):
+    sample = load_trajectory_file(input_path)
+    params, c_values, features = predict_hybrid_parameters(
+        sample.points,
+        sample.frame_ids,
+        fps,
+        predictor,
+        state_window_size,
+    )
+    landing_time_ms = solve_landing_time(params, landing_z)
+    predicted = evaluate_position(landing_time_ms, params)
+    result = {
+        "parameter_mode": "mlp",
+        "observed_points": len(sample.points),
+        "label": sample.landing_xyz,
+        "predicted": predicted,
+        "landing_time_ms": landing_time_ms,
+        "xy_error": float(np.linalg.norm(predicted[:2] - sample.landing_xyz[:2])),
+        "xyz_error": float(np.linalg.norm(predicted - sample.landing_xyz)),
+        "x_params": params["x"],
+        "y_params": params["y"],
+        "z_params": params["z"],
+        "c_values": c_values,
+        "state_features": features,
     }
     assert_finite_result(result)
     return result
@@ -225,6 +276,7 @@ def run_sliding_windows(input_path, fps, landing_z, window_size):
         end_index = start_index + window_size - 1
         window = observed[start_index : start_index + window_size]
         row = {
+            "parameter_mode": "curve-fit",
             "start_index": start_index,
             "end_index": end_index,
             "window_end_time_ms": end_index / fps * 1000.0,
@@ -241,6 +293,9 @@ def run_sliding_windows(input_path, fps, landing_z, window_size):
                     "pred_z": predicted[2],
                     "xy_error": result["xy_error"],
                     "xyz_error": result["xyz_error"],
+                    "c1": result["x_params"][2],
+                    "c2": result["y_params"][2],
+                    "c3": result["z_params"][2],
                 }
             )
         except Exception as exc:
@@ -253,11 +308,15 @@ def run_sliding_windows(input_path, fps, landing_z, window_size):
                     "pred_z": np.nan,
                     "xy_error": np.nan,
                     "xyz_error": np.nan,
+                    "c1": np.nan,
+                    "c2": np.nan,
+                    "c3": np.nan,
                 }
             )
         rows.append(row)
 
     return {
+        "parameter_mode": "curve-fit",
         "observed_points": len(observed),
         "observed": observed,
         "label": label,
@@ -395,9 +454,91 @@ def run_batch(input_dir, fps, landing_z, sliding=False, window_size=40):
         }
 
 
+def run_mlp_sliding(
+    input_path,
+    fps,
+    landing_z,
+    state_window_size,
+    predictor,
+):
+    sample = load_trajectory_file(input_path)
+    if len(sample.points) < state_window_size:
+        raise ValueError(
+            f"Need at least {state_window_size} observed points, got {len(sample.points)}"
+        )
+
+    rows = []
+    origin_frame = int(sample.frame_ids[0])
+    for endpoint in range(state_window_size, len(sample.points) + 1):
+        end_index = endpoint - 1
+        start_index = endpoint - state_window_size
+        row = {
+            "parameter_mode": "mlp",
+            "start_index": start_index,
+            "end_index": end_index,
+            "window_end_time_ms": (
+                (int(sample.frame_ids[end_index]) - origin_frame) / fps * 1000.0
+            ),
+            "status": "ok",
+        }
+        try:
+            params, c_values, _ = predict_hybrid_parameters(
+                sample.points[:endpoint],
+                sample.frame_ids[:endpoint],
+                fps,
+                predictor,
+                state_window_size,
+            )
+            landing_time_ms = solve_landing_time(params, landing_z)
+            predicted = evaluate_position(landing_time_ms, params)
+            row.update(
+                {
+                    "landing_time_from_window_ms": float(landing_time_ms),
+                    "pred_x": predicted[0],
+                    "pred_y": predicted[1],
+                    "pred_z": predicted[2],
+                    "xy_error": float(
+                        np.linalg.norm(predicted[:2] - sample.landing_xyz[:2])
+                    ),
+                    "xyz_error": float(
+                        np.linalg.norm(predicted - sample.landing_xyz)
+                    ),
+                    "c1": c_values[0],
+                    "c2": c_values[1],
+                    "c3": c_values[2],
+                }
+            )
+        except Exception as exc:
+            row.update(
+                {
+                    "status": f"failed: {exc}",
+                    "landing_time_from_window_ms": np.nan,
+                    "pred_x": np.nan,
+                    "pred_y": np.nan,
+                    "pred_z": np.nan,
+                    "xy_error": np.nan,
+                    "xyz_error": np.nan,
+                    "c1": np.nan,
+                    "c2": np.nan,
+                    "c3": np.nan,
+                }
+            )
+        rows.append(row)
+
+    return {
+        "parameter_mode": "mlp",
+        "observed_points": len(sample.points),
+        "observed": sample.points,
+        "label": sample.landing_xyz,
+        "window_size": state_window_size,
+        "rows": rows,
+    }
+
+
 def write_sliding_csv(rows, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
+        "parameter_mode",
         "start_index",
         "end_index",
         "window_end_time_ms",
@@ -407,6 +548,9 @@ def write_sliding_csv(rows, output_path):
         "pred_z",
         "xy_error",
         "xyz_error",
+        "c1",
+        "c2",
+        "c3",
         "status",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as handle:
@@ -441,7 +585,8 @@ def plot_sliding_result(sliding_result, output_path):
     axes[0].scatter([best_time], [best_error], color="#d62728", zorder=3, label="best")
     axes[0].set_ylabel("XY error (cm)")
     axes[0].set_title(
-        f"Sliding window landing prediction, window={sliding_result['window_size']} frames"
+        f"Sliding landing prediction ({sliding_result['parameter_mode']}), "
+        f"window={sliding_result['window_size']} frames"
     )
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
@@ -531,7 +676,6 @@ def draw_badminton_court(ax):
 
 
 def make_sliding_gif(sliding_result, output_path, fps):
-    import imageio.v2 as imageio
     import matplotlib
 
     matplotlib.use("Agg")
@@ -579,12 +723,15 @@ def make_sliding_gif(sliding_result, output_path, fps):
         ax.grid(True, alpha=0.3)
         ax.set_xlabel("X (cm)")
         ax.set_ylabel("Y (cm)")
-        ax.set_title("Sliding-window landing prediction on XY plane")
+        ax.set_title(
+            f"Sliding landing prediction on XY plane ({sliding_result['parameter_mode']})"
+        )
         ax.text(
             0.02,
             0.98,
             (
                 f"window: {start}-{end} ({window_size} frames)\n"
+                f"mode: {sliding_result['parameter_mode']}\n"
                 f"end time: {row['window_end_time_ms']:.1f} ms\n"
                 f"pred: ({row['pred_x']:.1f}, {row['pred_y']:.1f})\n"
                 f"GT: ({label[0]:.1f}, {label[1]:.1f})\n"
@@ -603,11 +750,26 @@ def make_sliding_gif(sliding_result, output_path, fps):
         frames.append(frame)
         plt.close(fig)
 
-    imageio.mimsave(output_path, frames, fps=fps)
+    try:
+        import imageio.v2 as imageio
+    except ImportError:
+        from PIL import Image
+
+        images = [Image.fromarray(frame) for frame in frames]
+        images[0].save(
+            output_path,
+            save_all=True,
+            append_images=images[1:],
+            duration=max(1, round(1000 / fps)),
+            loop=0,
+        )
+    else:
+        imageio.mimsave(output_path, frames, fps=fps)
 
 
 def print_result(result, fps, landing_z):
     print("Badminton trajectory fitting")
+    print(f"parameter_mode: {result['parameter_mode']}")
     print(f"fps: {fps:.6f}")
     print(f"landing_z: {landing_z:.6f}")
     print(f"observed_points: {result['observed_points']}")
@@ -616,6 +778,7 @@ def print_result(result, fps, landing_z):
     print(f"x_params(a1,b1,c1): {format_vector(result['x_params'])}")
     print(f"y_params(a2,b2,c2): {format_vector(result['y_params'])}")
     print(f"z_params(a3,b3,c3): {format_vector(result['z_params'])}")
+    print(f"predicted_c(c1,c2,c3): {format_vector(result['c_values'])}")
     print(f"landing_time_ms: {result['landing_time_ms']:.6f}")
     print(f"xy_error: {result['xy_error']:.6f}")
     print(f"xyz_error: {result['xyz_error']:.6f}")
@@ -628,6 +791,7 @@ def print_sliding_result(result, fps, landing_z, csv_output, plot_output, gif_ou
     last_ok_row = ok_rows[-1] if ok_rows else None
 
     print("Badminton sliding-window trajectory fitting")
+    print(f"parameter_mode: {result['parameter_mode']}")
     print(f"fps: {fps:.6f}")
     print(f"landing_z: {landing_z:.6f}")
     print(f"observed_points: {result['observed_points']}")
@@ -661,6 +825,33 @@ def print_sliding_result(result, fps, landing_z, csv_output, plot_output, gif_ou
 def parse_args():
     parser = argparse.ArgumentParser(
         description="Fit badminton trajectory using the formulas from MV-BMR Section 3.2.2."
+    )
+    parser.add_argument(
+        "--parameter-mode",
+        choices=["curve-fit", "mlp"],
+        default="curve-fit",
+        help="Parameter estimation mode. Default: curve-fit",
+    )
+    parser.add_argument(
+        "--mlp-model",
+        type=Path,
+        default=DEFAULT_MLP_MODEL,
+        help=f"MLP checkpoint path. Default: {DEFAULT_MLP_MODEL}",
+    )
+    parser.add_argument(
+        "--state-window-size",
+        type=int,
+        default=DEFAULT_STATE_WINDOW_SIZE,
+        help=(
+            "Recent points used to extract MLP state features. "
+            f"Default: {DEFAULT_STATE_WINDOW_SIZE}"
+        ),
+    )
+    parser.add_argument(
+        "--device",
+        choices=["auto", "cpu", "cuda"],
+        default="auto",
+        help="PyTorch inference device for MLP mode. Default: auto",
     )
     parser.add_argument(
         "--input",
@@ -720,14 +911,65 @@ def parse_args():
 
 def main():
     args = parse_args()
+    predictor = None
+    if args.parameter_mode == "mlp":
+        if args.device == "auto":
+            try:
+                import torch
+            except ImportError as exc:
+                raise RuntimeError(
+                    "PyTorch is required for MLP mode. Run with py -3.11."
+                ) from exc
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+        else:
+            device = args.device
+        predictor = CParameterPredictor(args.mlp_model, device=device)
+        if not np.isclose(args.fps, predictor.training_fps):
+            warnings.warn(
+                f"Checkpoint was trained at {predictor.training_fps:g} FPS, "
+                f"but inference uses {args.fps:g} FPS.",
+                RuntimeWarning,
+            )
 
-    run_batch(
-        input_dir=args.input,
-        fps=args.fps,
-        landing_z=args.landing_z,
-        sliding=args.sliding,
-        window_size=args.window_size,
-    )
+    if args.sliding:
+        if args.parameter_mode == "mlp":
+            result = run_mlp_sliding(
+                args.input,
+                args.fps,
+                args.landing_z,
+                args.state_window_size,
+                predictor,
+            )
+        else:
+            result = run_sliding_windows(
+                args.input,
+                args.fps,
+                args.landing_z,
+                args.window_size,
+            )
+        write_sliding_csv(result["rows"], args.csv_output)
+        plot_sliding_result(result, args.plot_output)
+        make_sliding_gif(result, args.gif_output, args.gif_fps)
+        print_sliding_result(
+            result,
+            args.fps,
+            args.landing_z,
+            args.csv_output,
+            args.plot_output,
+            args.gif_output,
+        )
+    else:
+        if args.parameter_mode == "mlp":
+            result = run_mlp(
+                args.input,
+                args.fps,
+                args.landing_z,
+                predictor,
+                args.state_window_size,
+            )
+        else:
+            result = run(args.input, args.fps, args.landing_z)
+        print_result(result, args.fps, args.landing_z)
 
 
 if __name__ == "__main__":

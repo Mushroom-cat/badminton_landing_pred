@@ -2,3 +2,5 @@ __pycache__/*
 *.csv
 *.gif
 *.png
+synthetic_debug_data/
+20260418_label_fit_fall/
