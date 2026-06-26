@@ -25,11 +25,11 @@ DEFAULT_INPUT = Path(__file__).with_name("trajectory.txt")
 DEFAULT_MLP_MODEL = Path(__file__).parents[1] / "models" / "c_parameter_mlp.pt"
 DEFAULT_FPS = 300.0
 DEFAULT_LANDING_Z = 0.0
-DEFAULT_WINDOW_SIZE = 40
-DEFAULT_PLOT_OUTPUT = Path(__file__).with_name("sliding_window_predictions.png")
-DEFAULT_CSV_OUTPUT = Path(__file__).with_name("sliding_window_predictions.csv")
-DEFAULT_GIF_OUTPUT = Path(__file__).with_name("sliding_window_predictions.gif")
+DEFAULT_PLOT_OUTPUT = Path(__file__).with_name("visible_prefix_predictions.png")
+DEFAULT_CSV_OUTPUT = Path(__file__).with_name("visible_prefix_predictions.csv")
+DEFAULT_GIF_OUTPUT = Path(__file__).with_name("visible_prefix_predictions.gif")
 DEFAULT_GIF_FPS = 6
+MIN_CURVE_FIT_PREFIX_POINTS = 4
 MAX_FUNCTION_EVALS = 50_000
 MAX_EXP_ARG = 700.0
 
@@ -244,8 +244,8 @@ def run_mlp(input_path, fps, landing_z, predictor, state_window_size):
     return result
 
 
-def predict_window(observed_window, label, fps, landing_z):
-    params = fit_trajectory(observed_window, fps)
+def predict_visible_prefix(observed_prefix, label, fps, landing_z):
+    params = fit_trajectory(observed_prefix, fps)
     landing_time_ms = solve_landing_time(params, landing_z)
     predicted = evaluate_position(landing_time_ms, params)
 
@@ -262,32 +262,32 @@ def predict_window(observed_window, label, fps, landing_z):
     return result
 
 
-def run_sliding_windows(input_path, fps, landing_z, window_size):
+def run_prefix_predictions(input_path, fps, landing_z):
     observed, label = load_trajectory(input_path)
-    if window_size < 4:
-        raise ValueError("Window size must be at least 4")
-    if len(observed) < window_size:
+    if len(observed) < MIN_CURVE_FIT_PREFIX_POINTS:
         raise ValueError(
-            f"Window size {window_size} is larger than observed point count {len(observed)}"
+            f"Need at least {MIN_CURVE_FIT_PREFIX_POINTS} observed points, got {len(observed)}"
         )
 
     rows = []
-    for start_index in range(0, len(observed) - window_size + 1):
-        end_index = start_index + window_size - 1
-        window = observed[start_index : start_index + window_size]
+    for endpoint in range(MIN_CURVE_FIT_PREFIX_POINTS, len(observed) + 1):
+        end_index = endpoint - 1
+        prefix = observed[:endpoint]
         row = {
             "parameter_mode": "curve-fit",
-            "start_index": start_index,
-            "end_index": end_index,
-            "window_end_time_ms": end_index / fps * 1000.0,
+            "visible_points": endpoint,
+            "prefix_end_index": end_index,
+            "prefix_end_time_ms": end_index / fps * 1000.0,
+            "state_start_index": "",
+            "state_end_index": "",
             "status": "ok",
         }
         try:
-            result = predict_window(window, label, fps, landing_z)
+            result = predict_visible_prefix(prefix, label, fps, landing_z)
             predicted = result["predicted"]
             row.update(
                 {
-                    "landing_time_from_window_ms": result["landing_time_ms"],
+                    "landing_time_from_prefix_ms": result["landing_time_ms"],
                     "pred_x": predicted[0],
                     "pred_y": predicted[1],
                     "pred_z": predicted[2],
@@ -302,7 +302,7 @@ def run_sliding_windows(input_path, fps, landing_z, window_size):
             row.update(
                 {
                     "status": f"failed: {exc}",
-                    "landing_time_from_window_ms": np.nan,
+                    "landing_time_from_prefix_ms": np.nan,
                     "pred_x": np.nan,
                     "pred_y": np.nan,
                     "pred_z": np.nan,
@@ -320,7 +320,8 @@ def run_sliding_windows(input_path, fps, landing_z, window_size):
         "observed_points": len(observed),
         "observed": observed,
         "label": label,
-        "window_size": window_size,
+        "min_visible_points": MIN_CURVE_FIT_PREFIX_POINTS,
+        "state_window_size": None,
         "rows": rows,
     }
 
@@ -329,7 +330,6 @@ def run_batch(
     fps,
     landing_z,
     sliding=False,
-    window_size=40,
     parameter_mode="curve-fit",
     predictor=None,
     state_window_size=DEFAULT_STATE_WINDOW_SIZE,
@@ -356,7 +356,7 @@ def run_batch(
         try:
             if sliding:
                 if parameter_mode == "mlp":
-                    result = run_mlp_sliding(
+                    result = run_mlp_prefix_predictions(
                         txt_file,
                         fps,
                         landing_z,
@@ -364,12 +364,7 @@ def run_batch(
                         predictor,
                     )
                 else:
-                    result = run_sliding_windows(
-                        txt_file,
-                        fps,
-                        landing_z,
-                        window_size,
-                    )
+                    result = run_prefix_predictions(txt_file, fps, landing_z)
 
                 ok_rows = [
                     row for row in result["rows"]
@@ -377,7 +372,7 @@ def run_batch(
                 ]
 
                 if not ok_rows:
-                    print("  No successful sliding-window result")
+                    print("  No successful visible-prefix result")
                     continue
 
                 best_row = min(ok_rows, key=lambda row: row["xy_error"])
@@ -390,17 +385,17 @@ def run_batch(
                 last_xyz_error = last_row["xyz_error"]
 
                 print(
-                    f"  best window xy_error  = {best_xy_error:.6f}"
+                    f"  best prefix xy_error  = {best_xy_error:.6f}"
                 )
                 print(
-                    f"  best window xyz_error = {best_xyz_error:.6f}"
+                    f"  best prefix xyz_error = {best_xyz_error:.6f}"
                 )
 
                 print(
-                    f"  last window xy_error  = {last_xy_error:.6f}"
+                    f"  last prefix xy_error  = {last_xy_error:.6f}"
                 )
                 print(
-                    f"  last window xyz_error = {last_xyz_error:.6f}"
+                    f"  last prefix xyz_error = {last_xyz_error:.6f}"
                 )
 
                 results.append({
@@ -486,7 +481,7 @@ def run_batch(
         }
 
 
-def run_mlp_sliding(
+def run_mlp_prefix_predictions(
     input_path,
     fps,
     landing_z,
@@ -506,11 +501,13 @@ def run_mlp_sliding(
         start_index = endpoint - state_window_size
         row = {
             "parameter_mode": "mlp",
-            "start_index": start_index,
-            "end_index": end_index,
-            "window_end_time_ms": (
+            "visible_points": endpoint,
+            "prefix_end_index": end_index,
+            "prefix_end_time_ms": (
                 (int(sample.frame_ids[end_index]) - origin_frame) / fps * 1000.0
             ),
+            "state_start_index": start_index,
+            "state_end_index": end_index,
             "status": "ok",
         }
         try:
@@ -525,7 +522,7 @@ def run_mlp_sliding(
             predicted = evaluate_position(landing_time_ms, params)
             row.update(
                 {
-                    "landing_time_from_window_ms": float(landing_time_ms),
+                    "landing_time_from_prefix_ms": float(landing_time_ms),
                     "pred_x": predicted[0],
                     "pred_y": predicted[1],
                     "pred_z": predicted[2],
@@ -544,7 +541,7 @@ def run_mlp_sliding(
             row.update(
                 {
                     "status": f"failed: {exc}",
-                    "landing_time_from_window_ms": np.nan,
+                    "landing_time_from_prefix_ms": np.nan,
                     "pred_x": np.nan,
                     "pred_y": np.nan,
                     "pred_z": np.nan,
@@ -562,7 +559,8 @@ def run_mlp_sliding(
         "observed_points": len(sample.points),
         "observed": sample.points,
         "label": sample.landing_xyz,
-        "window_size": state_window_size,
+        "min_visible_points": state_window_size,
+        "state_window_size": state_window_size,
         "rows": rows,
     }
 
@@ -571,10 +569,12 @@ def write_sliding_csv(rows, output_path):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
         "parameter_mode",
-        "start_index",
-        "end_index",
-        "window_end_time_ms",
-        "landing_time_from_window_ms",
+        "visible_points",
+        "prefix_end_index",
+        "prefix_end_time_ms",
+        "state_start_index",
+        "state_end_index",
+        "landing_time_from_prefix_ms",
         "pred_x",
         "pred_y",
         "pred_z",
@@ -599,9 +599,9 @@ def plot_sliding_result(sliding_result, output_path):
 
     rows = [row for row in sliding_result["rows"] if row["status"] == "ok"]
     if not rows:
-        raise ValueError("No successful sliding-window predictions to plot")
+        raise ValueError("No successful visible-prefix predictions to plot")
 
-    times = np.asarray([row["window_end_time_ms"] for row in rows], dtype=np.float64)
+    times = np.asarray([row["prefix_end_time_ms"] for row in rows], dtype=np.float64)
     pred_x = np.asarray([row["pred_x"] for row in rows], dtype=np.float64)
     pred_y = np.asarray([row["pred_y"] for row in rows], dtype=np.float64)
     xy_error = np.asarray([row["xy_error"] for row in rows], dtype=np.float64)
@@ -616,10 +616,10 @@ def plot_sliding_result(sliding_result, output_path):
     axes[0].plot(times, xy_error, color="#1f77b4", linewidth=2, label="xy_error")
     axes[0].scatter([best_time], [best_error], color="#d62728", zorder=3, label="best")
     axes[0].set_ylabel("XY error (cm)")
-    axes[0].set_title(
-        f"Sliding landing prediction ({sliding_result['parameter_mode']}), "
-        f"window={sliding_result['window_size']} frames"
-    )
+    title = f"Visible-prefix landing prediction ({sliding_result['parameter_mode']})"
+    if sliding_result.get("state_window_size"):
+        title += f", MLP state window={sliding_result['state_window_size']} frames"
+    axes[0].set_title(title)
     axes[0].grid(True, alpha=0.3)
     axes[0].legend()
 
@@ -627,7 +627,7 @@ def plot_sliding_result(sliding_result, output_path):
     axes[1].plot(times, pred_y, color="#ff7f0e", linewidth=2, label="pred_y")
     axes[1].axhline(label[0], color="#2ca02c", linestyle="--", alpha=0.6, label="label_x")
     axes[1].axhline(label[1], color="#ff7f0e", linestyle="--", alpha=0.6, label="label_y")
-    axes[1].set_xlabel("Window end time (ms)")
+    axes[1].set_xlabel("Visible prefix end time (ms)")
     axes[1].set_ylabel("Landing coordinate (cm)")
     axes[1].grid(True, alpha=0.3)
     axes[1].legend(ncol=2)
@@ -715,11 +715,11 @@ def make_sliding_gif(sliding_result, output_path, fps):
 
     rows = [row for row in sliding_result["rows"] if row["status"] == "ok"]
     if not rows:
-        raise ValueError("No successful sliding-window predictions to animate")
+        raise ValueError("No successful visible-prefix predictions to animate")
 
     observed = sliding_result["observed"]
     label = sliding_result["label"]
-    window_size = sliding_result["window_size"]
+    state_window_size = sliding_result.get("state_window_size")
     pred_xy = np.asarray([[row["pred_x"], row["pred_y"]] for row in rows], dtype=np.float64)
 
     x_values = np.concatenate([observed[:, 0], pred_xy[:, 0], [label[0], 0.0, COURT_LENGTH]])
@@ -734,17 +734,31 @@ def make_sliding_gif(sliding_result, output_path, fps):
     output_path.parent.mkdir(parents=True, exist_ok=True)
     frames = []
     for frame_index, row in enumerate(rows):
-        start = int(row["start_index"])
-        end = int(row["end_index"])
-        window = observed[start : end + 1]
+        end = int(row["prefix_end_index"])
+        prefix = observed[: end + 1]
+        state_start = row.get("state_start_index", "")
+        state_end = row.get("state_end_index", "")
+        state_points = None
+        if state_start != "" and state_end != "":
+            state_start = int(state_start)
+            state_end = int(state_end)
+            state_points = observed[state_start : state_end + 1]
         history = pred_xy[: frame_index + 1]
 
         fig, ax = plt.subplots(figsize=(10, 6))
         draw_badminton_court(ax)
         ax.plot(observed[:, 0], observed[:, 1], color="#bdbdbd", linewidth=1.5, label="observed path")
         ax.scatter(observed[:, 0], observed[:, 1], color="#d9d9d9", s=14)
-        ax.plot(window[:, 0], window[:, 1], color="#1f77b4", linewidth=2.5, label="current window")
-        ax.scatter(window[:, 0], window[:, 1], color="#1f77b4", s=20)
+        ax.plot(prefix[:, 0], prefix[:, 1], color="#1f77b4", linewidth=2.5, label="visible prefix")
+        ax.scatter(prefix[:, 0], prefix[:, 1], color="#1f77b4", s=20)
+        if state_points is not None:
+            ax.plot(
+                state_points[:, 0],
+                state_points[:, 1],
+                color="#9467bd",
+                linewidth=3.0,
+                label="MLP state window",
+            )
         ax.plot(history[:, 0], history[:, 1], color="#ff7f0e", linewidth=2, label="predicted history")
         ax.scatter(history[:-1, 0], history[:-1, 1], color="#ffbb78", s=24)
         ax.scatter(history[-1, 0], history[-1, 1], color="#d62728", s=90, label="current prediction")
@@ -756,15 +770,20 @@ def make_sliding_gif(sliding_result, output_path, fps):
         ax.set_xlabel("X (cm)")
         ax.set_ylabel("Y (cm)")
         ax.set_title(
-            f"Sliding landing prediction on XY plane ({sliding_result['parameter_mode']})"
+            f"Visible-prefix landing prediction on XY plane ({sliding_result['parameter_mode']})"
         )
+        if state_window_size:
+            state_text = f"state window: {state_start}-{state_end} ({state_window_size} frames)\n"
+        else:
+            state_text = ""
         ax.text(
             0.02,
             0.98,
             (
-                f"window: {start}-{end} ({window_size} frames)\n"
+                f"visible prefix: 0-{end} ({row['visible_points']} frames)\n"
+                f"{state_text}"
                 f"mode: {sliding_result['parameter_mode']}\n"
-                f"end time: {row['window_end_time_ms']:.1f} ms\n"
+                f"end time: {row['prefix_end_time_ms']:.1f} ms\n"
                 f"pred: ({row['pred_x']:.1f}, {row['pred_y']:.1f})\n"
                 f"GT: ({label[0]:.1f}, {label[1]:.1f})\n"
                 f"xy error: {row['xy_error']:.2f} cm"
@@ -822,27 +841,30 @@ def print_sliding_result(result, fps, landing_z, csv_output, plot_output, gif_ou
     best_row = min(ok_rows, key=lambda row: row["xy_error"]) if ok_rows else None
     last_ok_row = ok_rows[-1] if ok_rows else None
 
-    print("Badminton sliding-window trajectory fitting")
+    print("Badminton visible-prefix trajectory fitting")
     print(f"parameter_mode: {result['parameter_mode']}")
     print(f"fps: {fps:.6f}")
     print(f"landing_z: {landing_z:.6f}")
     print(f"observed_points: {result['observed_points']}")
-    print(f"window_size: {result['window_size']}")
-    print(f"windows_total: {len(result['rows'])}")
-    print(f"windows_success: {len(ok_rows)}")
-    print(f"windows_failed: {len(failed_rows)}")
+    print(f"min_visible_points: {result['min_visible_points']}")
+    if result.get("state_window_size"):
+        print(f"mlp_state_window_size: {result['state_window_size']}")
+    print(f"prefixes_total: {len(result['rows'])}")
+    print(f"prefixes_success: {len(ok_rows)}")
+    print(f"prefixes_failed: {len(failed_rows)}")
     print(f"label_xyz: {format_vector(result['label'])}")
     if last_ok_row:
         print(
-            "last_window_predicted_xyz: "
+            "last_prefix_predicted_xyz: "
             f"{format_vector([last_ok_row['pred_x'], last_ok_row['pred_y'], last_ok_row['pred_z']])}"
         )
-        print(f"last_window_xy_error: {last_ok_row['xy_error']:.6f}")
+        print(f"last_prefix_xy_error: {last_ok_row['xy_error']:.6f}")
     if best_row:
         print(
-            "best_window: "
-            f"start={best_row['start_index']}, end={best_row['end_index']}, "
-            f"end_time_ms={best_row['window_end_time_ms']:.6f}"
+            "best_prefix: "
+            f"visible_points={best_row['visible_points']}, "
+            f"end={best_row['prefix_end_index']}, "
+            f"end_time_ms={best_row['prefix_end_time_ms']:.6f}"
         )
         print(
             "best_predicted_xyz: "
@@ -906,37 +928,35 @@ def parse_args():
     parser.add_argument(
         "--sliding",
         action="store_true",
-        help="Run dynamic sliding-window landing prediction instead of one full-sequence fit.",
-    )
-    parser.add_argument(
-        "--window-size",
-        type=int,
-        default=DEFAULT_WINDOW_SIZE,
-        help=f"Observed points per sliding window. Default: {DEFAULT_WINDOW_SIZE}",
+        help=(
+            "Run dynamic visible-prefix landing prediction instead of one full-sequence fit. "
+            "Curve-fit mode fits each full visible prefix; MLP mode uses the recent "
+            "state window only for c-parameter prediction."
+        ),
     )
     parser.add_argument(
         "--plot-output",
         type=Path,
         default=DEFAULT_PLOT_OUTPUT,
-        help=f"Sliding-window plot output path. Default: {DEFAULT_PLOT_OUTPUT}",
+        help=f"Visible-prefix plot output path. Default: {DEFAULT_PLOT_OUTPUT}",
     )
     parser.add_argument(
         "--csv-output",
         type=Path,
         default=DEFAULT_CSV_OUTPUT,
-        help=f"Sliding-window CSV output path. Default: {DEFAULT_CSV_OUTPUT}",
+        help=f"Visible-prefix CSV output path. Default: {DEFAULT_CSV_OUTPUT}",
     )
     parser.add_argument(
         "--gif-output",
         type=Path,
         default=DEFAULT_GIF_OUTPUT,
-        help=f"Sliding-window GIF output path. Default: {DEFAULT_GIF_OUTPUT}",
+        help=f"Visible-prefix GIF output path. Default: {DEFAULT_GIF_OUTPUT}",
     )
     parser.add_argument(
         "--gif-fps",
         type=int,
         default=DEFAULT_GIF_FPS,
-        help=f"Frames per second for the sliding-window GIF. Default: {DEFAULT_GIF_FPS}",
+        help=f"Frames per second for the visible-prefix GIF. Default: {DEFAULT_GIF_FPS}",
     )
     return parser.parse_args()
 
@@ -971,7 +991,6 @@ def main():
             args.fps,
             args.landing_z,
             sliding=args.sliding,
-            window_size=args.window_size,
             parameter_mode=args.parameter_mode,
             predictor=predictor,
             state_window_size=args.state_window_size,
@@ -980,7 +999,7 @@ def main():
 
     if args.sliding:
         if args.parameter_mode == "mlp":
-            result = run_mlp_sliding(
+            result = run_mlp_prefix_predictions(
                 args.input,
                 args.fps,
                 args.landing_z,
@@ -988,12 +1007,7 @@ def main():
                 predictor,
             )
         else:
-            result = run_sliding_windows(
-                args.input,
-                args.fps,
-                args.landing_z,
-                args.window_size,
-            )
+            result = run_prefix_predictions(args.input, args.fps, args.landing_z)
         write_sliding_csv(result["rows"], args.csv_output)
         plot_sliding_result(result, args.plot_output)
         make_sliding_gif(result, args.gif_output, args.gif_fps)

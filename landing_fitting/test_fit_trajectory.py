@@ -6,7 +6,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from landing_fitting.fit_trajectory import main, run_batch
+import numpy as np
+
+from landing_fitting.fit_trajectory import main, run_batch, run_prefix_predictions
 
 
 class BatchPredictionTests(unittest.TestCase):
@@ -41,7 +43,7 @@ class BatchPredictionTests(unittest.TestCase):
                 self.assertIs(call.args[3], predictor)
                 self.assertEqual(call.args[4], 30)
 
-    def test_sliding_batch_uses_mode_specific_window(self):
+    def test_sliding_batch_uses_visible_prefix_predictions(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             input_dir = Path(temp_dir)
             (input_dir / "sample.txt").write_text("unused", encoding="utf-8")
@@ -53,7 +55,7 @@ class BatchPredictionTests(unittest.TestCase):
             }
 
             with patch(
-                "landing_fitting.fit_trajectory.run_sliding_windows",
+                "landing_fitting.fit_trajectory.run_prefix_predictions",
                 return_value=sliding_result,
             ) as sliding_mock, redirect_stdout(io.StringIO()):
                 result = run_batch(
@@ -61,13 +63,52 @@ class BatchPredictionTests(unittest.TestCase):
                     300.0,
                     0.0,
                     sliding=True,
-                    window_size=40,
                     parameter_mode="curve-fit",
                 )
 
             sliding_mock.assert_called_once()
             self.assertEqual(result["average_best_xy_error"], 2.0)
             self.assertEqual(result["average_last_xy_error"], 2.0)
+
+    def test_curve_fit_sliding_uses_growing_visible_prefixes(self):
+        observed = np.asarray(
+            [
+                [0.0, 0.0, 100.0],
+                [1.0, 0.0, 90.0],
+                [2.0, 0.0, 80.0],
+                [3.0, 0.0, 70.0],
+                [4.0, 0.0, 60.0],
+            ],
+            dtype=np.float64,
+        )
+        label = np.asarray([5.0, 0.0, 0.0], dtype=np.float64)
+        seen_lengths = []
+
+        def fake_predict(prefix, _label, _fps, _landing_z):
+            seen_lengths.append(len(prefix))
+            value = float(len(prefix))
+            return {
+                "landing_time_ms": value,
+                "predicted": np.asarray([value, 0.0, 0.0], dtype=np.float64),
+                "xy_error": value,
+                "xyz_error": value,
+                "x_params": np.asarray([0.0, 0.0, value], dtype=np.float64),
+                "y_params": np.asarray([0.0, 0.0, value], dtype=np.float64),
+                "z_params": np.asarray([0.0, 0.0, value], dtype=np.float64),
+            }
+
+        with patch(
+            "landing_fitting.fit_trajectory.load_trajectory",
+            return_value=(observed, label),
+        ), patch(
+            "landing_fitting.fit_trajectory.predict_visible_prefix",
+            side_effect=fake_predict,
+        ):
+            result = run_prefix_predictions(Path("unused.txt"), 300.0, 0.0)
+
+        self.assertEqual(seen_lengths, [4, 5])
+        self.assertEqual([row["visible_points"] for row in result["rows"]], [4, 5])
+        self.assertEqual(result["rows"][0]["prefix_end_index"], 3)
 
 
 class InputDispatchTests(unittest.TestCase):
@@ -78,7 +119,6 @@ class InputDispatchTests(unittest.TestCase):
             fps=300.0,
             landing_z=0.0,
             sliding=False,
-            window_size=40,
             state_window_size=20,
         )
 

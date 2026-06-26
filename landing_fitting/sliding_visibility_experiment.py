@@ -34,12 +34,21 @@ DEFAULT_CSV_OUTPUT = Path(__file__).with_name(
 DEFAULT_PLOT_OUTPUT = Path(__file__).with_name(
     "20260418_sliding_visibility_comparison.png"
 )
+DEFAULT_SUFFIX_CSV_OUTPUT = Path(__file__).with_name(
+    "20260418_sliding_suffix_visibility_comparison.csv"
+)
+DEFAULT_SUFFIX_PLOT_OUTPUT = Path(__file__).with_name(
+    "20260418_sliding_suffix_visibility_comparison.png"
+)
 CSV_FIELDS = (
     "file",
     "trajectory_group",
     "shot_type",
     "total_observed_frames",
+    "alignment",
     "visible_frames",
+    "visible_start_index",
+    "visible_end_index",
     "hidden_frames",
     "mlp_pred_x",
     "mlp_pred_y",
@@ -68,7 +77,7 @@ def trajectory_group(path):
     return stem
 
 
-def load_test_samples(data_dir, predictor):
+def load_test_samples(data_dir, predictor, allow_missing=False):
     test_names = predictor.splits.get("test")
     if not test_names:
         raise ValueError("The MLP checkpoint does not contain a test split")
@@ -79,8 +88,12 @@ def load_test_samples(data_dir, predictor):
     for name in test_names:
         path = data_dir / name
         if not path.is_file():
+            if allow_missing:
+                continue
             raise FileNotFoundError(f"Test trajectory not found: {path}")
         samples.append(load_trajectory_file(path))
+    if not samples:
+        raise ValueError("No checkpoint test trajectories were found")
     return samples
 
 
@@ -105,9 +118,30 @@ def _finite_prediction(predicted, landing_time_ms, xy_error):
         raise ValueError("Prediction contains non-finite values")
 
 
-def predict_mlp(sample, visible_frames, fps, landing_z, predictor):
-    points = sample.points[:visible_frames]
-    frame_ids = sample.frame_ids[:visible_frames]
+def visible_segment(sample, visible_frames, alignment):
+    if visible_frames < 1:
+        raise ValueError("visible_frames must be positive")
+    if visible_frames > len(sample.points):
+        raise ValueError(
+            f"visible_frames={visible_frames} exceeds sample length {len(sample.points)}"
+        )
+    if alignment == "prefix":
+        start_index = 0
+    elif alignment == "suffix":
+        start_index = len(sample.points) - visible_frames
+    else:
+        raise ValueError(f"Unsupported alignment: {alignment}")
+    end_index = start_index + visible_frames
+    return (
+        sample.points[start_index:end_index],
+        sample.frame_ids[start_index:end_index],
+        start_index,
+        end_index - 1,
+    )
+
+
+def predict_mlp(sample, visible_frames, fps, landing_z, predictor, alignment="prefix"):
+    points, frame_ids, _, _ = visible_segment(sample, visible_frames, alignment)
     params, _, _ = predict_hybrid_parameters(
         points,
         frame_ids,
@@ -122,9 +156,8 @@ def predict_mlp(sample, visible_frames, fps, landing_z, predictor):
     return predicted, float(landing_time_ms), xy_error
 
 
-def predict_direct(sample, visible_frames, fps, landing_z):
-    points = sample.points[:visible_frames]
-    frame_ids = sample.frame_ids[:visible_frames]
+def predict_direct(sample, visible_frames, fps, landing_z, alignment="prefix"):
+    points, frame_ids, _, _ = visible_segment(sample, visible_frames, alignment)
     params = fit_all_parameters(points, frame_ids, fps)
     landing_time_ms = solve_landing_time(params, landing_z)
     predicted = evaluate_position(landing_time_ms, params)
@@ -133,7 +166,16 @@ def predict_direct(sample, visible_frames, fps, landing_z):
     return predicted, float(landing_time_ms), xy_error
 
 
-def run_experiment(samples, predictor, fps, landing_z, min_visible_frames):
+def run_experiment(
+    samples,
+    predictor,
+    fps,
+    landing_z,
+    min_visible_frames,
+    alignment="prefix",
+):
+    if alignment not in {"prefix", "suffix"}:
+        raise ValueError("--alignment must be either prefix or suffix")
     if min_visible_frames < predictor.state_window_size:
         raise ValueError(
             f"min_visible_frames must be at least {predictor.state_window_size} "
@@ -150,12 +192,20 @@ def run_experiment(samples, predictor, fps, landing_z, min_visible_frames):
     rows = []
     for visible_frames in range(max_visible_frames, min_visible_frames - 1, -1):
         for sample in samples:
+            _, _, visible_start_index, visible_end_index = visible_segment(
+                sample,
+                visible_frames,
+                alignment,
+            )
             row = {
                 "file": sample.path.name,
                 "trajectory_group": trajectory_group(sample.path),
                 "shot_type": shot_type(sample.path),
                 "total_observed_frames": len(sample.points),
+                "alignment": alignment,
                 "visible_frames": visible_frames,
+                "visible_start_index": visible_start_index,
+                "visible_end_index": visible_end_index,
                 "hidden_frames": len(sample.points) - visible_frames,
                 "mlp_status": "ok",
                 "direct_status": "ok",
@@ -170,6 +220,7 @@ def run_experiment(samples, predictor, fps, landing_z, min_visible_frames):
                     fps,
                     landing_z,
                     predictor,
+                    alignment,
                 )
                 row.update(
                     {
@@ -189,6 +240,7 @@ def run_experiment(samples, predictor, fps, landing_z, min_visible_frames):
                     visible_frames,
                     fps,
                     landing_z,
+                    alignment,
                 )
                 row.update(
                     {
@@ -259,13 +311,17 @@ def write_csv(rows, output_path):
         writer.writerows(rows)
 
 
-def plot_comparison(summaries, output_path, trajectory_count):
+def plot_comparison(summaries, output_path, trajectory_count, alignment):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    x = np.asarray([row["visible_frames"] for row in summaries], dtype=np.float64)
+    plot_summaries = sorted(summaries, key=lambda row: int(row["visible_frames"]))
+    x = np.asarray(
+        [row["visible_frames"] for row in plot_summaries],
+        dtype=np.float64,
+    )
     fig, ax = plt.subplots(figsize=(10, 6))
     styles = {
         "mlp": {"color": "#087e8b", "label": "MLP-assisted fitting"},
@@ -275,9 +331,9 @@ def plot_comparison(summaries, output_path, trajectory_count):
         },
     }
     for prefix, style in styles.items():
-        mean = np.asarray([row[f"{prefix}_mean"] for row in summaries])
-        q25 = np.asarray([row[f"{prefix}_q25"] for row in summaries])
-        q75 = np.asarray([row[f"{prefix}_q75"] for row in summaries])
+        mean = np.asarray([row[f"{prefix}_mean"] for row in plot_summaries])
+        q25 = np.asarray([row[f"{prefix}_q25"] for row in plot_summaries])
+        q75 = np.asarray([row[f"{prefix}_q75"] for row in plot_summaries])
         ax.fill_between(x, q25, q75, color=style["color"], alpha=0.16)
         ax.plot(
             x,
@@ -301,22 +357,24 @@ def plot_comparison(summaries, output_path, trajectory_count):
                 fontweight="semibold",
             )
 
-    ax.set_xlim(float(np.max(x)), float(np.min(x)))
+    ax.set_xlim(float(np.min(x)), float(np.max(x)))
     max_frame = int(np.max(x))
     min_frame = int(np.min(x))
-    tick_values = [max_frame]
+    tick_values = [min_frame]
     tick_values.extend(
         value
-        for value in range(max_frame - 1, min_frame - 1, -1)
-        if value % 5 == 0 and max_frame - value >= 5
+        for value in range(min_frame + 1, max_frame + 1)
+        if value % 5 == 0 and value - min_frame >= 5
     )
-    if min_frame not in tick_values:
-        tick_values.append(min_frame)
+    if max_frame not in tick_values:
+        tick_values.append(max_frame)
     ax.set_xticks(tick_values)
-    ax.set_xlabel("Visible frames (decreasing)")
+    ax.set_xlabel("Visible frames (increasing)")
     ax.set_ylabel("Mean XY landing error (cm)")
+    alignment_label = "prefix-aligned" if alignment == "prefix" else "suffix-aligned"
     ax.set_title(
-        f"Landing prediction as visible trajectory shrinks ({trajectory_count} test trajectories)"
+        "Landing prediction by visible trajectory length "
+        f"({alignment_label}, {trajectory_count} test trajectories)"
     )
     ax.grid(True, alpha=0.28)
     ax.legend()
@@ -333,10 +391,12 @@ def print_summary(
     plot_output,
     trajectory_file_count,
     trajectory_group_count,
+    alignment,
 ):
     first = summaries[0]
     last = summaries[-1]
     print("Sliding visibility comparison")
+    print(f"alignment: {alignment}")
     print(f"test_trajectory_files: {trajectory_file_count}")
     print(f"independent_trajectory_groups: {trajectory_group_count}")
     print(
@@ -367,9 +427,15 @@ def parse_args():
     parser.add_argument("--fps", type=float, default=300.0)
     parser.add_argument("--landing-z", type=float, default=0.0)
     parser.add_argument("--min-visible-frames", type=int, default=20)
-    parser.add_argument("--csv-output", type=Path, default=DEFAULT_CSV_OUTPUT)
-    parser.add_argument("--plot-output", type=Path, default=DEFAULT_PLOT_OUTPUT)
+    parser.add_argument("--alignment", choices=["prefix", "suffix"], default="prefix")
+    parser.add_argument("--csv-output", type=Path)
+    parser.add_argument("--plot-output", type=Path)
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
+    parser.add_argument(
+        "--allow-missing-test-files",
+        action="store_true",
+        help="Skip checkpoint test files that are no longer present in --data-dir.",
+    )
     return parser.parse_args()
 
 
@@ -379,6 +445,18 @@ def main():
         raise ValueError("--fps must be positive")
     if args.min_visible_frames < 3:
         raise ValueError("--min-visible-frames must be at least 3")
+    if args.csv_output is None:
+        args.csv_output = (
+            DEFAULT_SUFFIX_CSV_OUTPUT
+            if args.alignment == "suffix"
+            else DEFAULT_CSV_OUTPUT
+        )
+    if args.plot_output is None:
+        args.plot_output = (
+            DEFAULT_SUFFIX_PLOT_OUTPUT
+            if args.alignment == "suffix"
+            else DEFAULT_PLOT_OUTPUT
+        )
 
     device = args.device
     if device == "auto":
@@ -395,7 +473,11 @@ def main():
             f"is {args.fps:g}",
             RuntimeWarning,
         )
-    samples = load_test_samples(args.data_dir, predictor)
+    samples = load_test_samples(
+        args.data_dir,
+        predictor,
+        allow_missing=args.allow_missing_test_files,
+    )
     trajectory_group_count = len(
         {trajectory_group(sample.path) for sample in samples}
     )
@@ -405,10 +487,16 @@ def main():
         args.fps,
         args.landing_z,
         args.min_visible_frames,
+        args.alignment,
     )
     summaries = summarize_rows(rows)
     write_csv(rows, args.csv_output)
-    plot_comparison(summaries, args.plot_output, trajectory_group_count)
+    plot_comparison(
+        summaries,
+        args.plot_output,
+        trajectory_group_count,
+        args.alignment,
+    )
     print_summary(
         rows,
         summaries,
@@ -416,6 +504,7 @@ def main():
         args.plot_output,
         len(samples),
         trajectory_group_count,
+        args.alignment,
     )
 
 
