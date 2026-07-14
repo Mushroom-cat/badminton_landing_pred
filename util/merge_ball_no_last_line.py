@@ -40,7 +40,7 @@ def merge_coordinate_files(folder1, folder2, output_folder):
 
                 # 判断是否为最后一行
                 # index 是从 0 开始的，所以最后一行是 total_lines - 1
-                if index == total_lines - 1:
+                if False: # 如果没有落地点就改成这个
                     # 最后一行特殊处理：直接原样加入，不追加任何东西
                     processed_lines.append(line)
                 else:

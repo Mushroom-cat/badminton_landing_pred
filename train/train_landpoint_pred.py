@@ -48,7 +48,7 @@ def main():
     
     parser = argparse.ArgumentParser()
     # parser.add_argument('--data_folder', type=str, default='/home/zhaoxuhao/badminton_xh/20250809_Seq_data_v2/20250809_Seq_data')
-    parser.add_argument('--data_folder', type=str, default='datasets/scene1+2',
+    parser.add_argument('--data_folder', type=str, default='../datasets/scene3',
                         help="训练数据集路径；未设置 --data_folders 时使用")
     parser.add_argument('--data_folders', type=str, nargs='+', default=None,
                         help="多个训练数据集路径；若提供则忽略 --data_folder")

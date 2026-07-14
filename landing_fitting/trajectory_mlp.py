@@ -1,10 +1,20 @@
+# numpy版本太高了所以要手动映射缺失的模块路径。如果你numpy版本不高可以把这块删掉！！
+from __future__ import annotations
+import sys
+import numpy.core
+# 手动映射缺失的模块路径
+sys.modules['numpy._core'] = numpy.core
+sys.modules['numpy._core.multiarray'] = numpy.core.multiarray
+sys.modules['numpy._core.umath'] = numpy.core.umath
+sys.modules['numpy._core.numerictypes'] = numpy.core.numerictypes
+# ————————————————————————————————————————————————————————————————————
+
 from dataclasses import dataclass, replace
 from pathlib import Path
 import warnings
 
 import numpy as np
 from scipy.optimize import OptimizeWarning, brentq, curve_fit
-
 
 FEATURE_NAMES = (
     "x",
@@ -423,7 +433,6 @@ class CParameterPredictor:
             checkpoint = torch.load(
                 checkpoint_path,
                 map_location=self.device,
-                weights_only=False,
             )
         except TypeError:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)

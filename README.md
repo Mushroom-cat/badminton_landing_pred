@@ -244,3 +244,14 @@ python Labeled_2D_Points_Racket/racket_pose_train.py
 **击球前模型**：设置 `min_offset_len=5, max_offset_len=25`（跳过末尾击球后的帧）
 
 **击球后模型**：设置 `min_offset_len=0, max_offset_len=4`（使用接近末尾的帧）
+
+
+---
+
+## 对比轨迹拟合和落点预测结果
+
+infer/run_compare.sh是在无落点标签的数据集上对比轨迹拟合和落点预测结果。击球前模型设置--pose-skip-n 5，击球后模型设置--pose-skip-n 0。
+
+infer/run_compare_gt.sh是在有落点标签的数据集上对比轨迹拟合和落点预测结果，并使用落点标签验证两模型的效果。击球前模型设置--pose-skip-n 5，击球后模型设置--pose-skip-n 0。
+
+util/merge_ball.py和util/merge_ball_no_last_line.py是用来将姿态数据和羽毛球数据合并到一起的，使用的时候记得改里面的数据集路径代码。前者用于最后一行带落点标签的数据集，后者用于不带落点标签的数据集。
