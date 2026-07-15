@@ -1,5 +1,5 @@
 python compare_duida_pose_fit_predictions.py \
-  --pose-model ../models/before.pt \
+  --pose-model ../models/before_pose_racket_trend.pt \
   --fit-model ../models/c_parameter_mlp_fall.pt \
   --pose-mode before \
   --pose-dir '../datasets/2026-7-10test/4-poseball' \

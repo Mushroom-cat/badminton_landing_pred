@@ -255,3 +255,12 @@ infer/run_compare.sh是在无落点标签的数据集上对比轨迹拟合和落
 infer/run_compare_gt.sh是在有落点标签的数据集上对比轨迹拟合和落点预测结果，并使用落点标签验证两模型的效果。击球前模型设置--pose-skip-n 5，击球后模型设置--pose-skip-n 0。
 
 util/merge_ball.py和util/merge_ball_no_last_line.py是用来将姿态数据和羽毛球数据合并到一起的，使用的时候记得改里面的数据集路径代码。前者用于最后一行带落点标签的数据集，后者用于不带落点标签的数据集。
+
+`compare_duida_pose_fit_predictions.py` 默认还会在 `infer/duida_pose_fit_3d/` 为每个配对样本生成一份可旋转、缩放、悬停查看坐标的交互式三维 HTML。图中同时包含：
+
+- 轨迹拟合输入球点、拟合/外推曲线及拟合预测落点；
+- 击球前和击球后窗口的球拍中心轨迹；
+- 击球后模型实际使用的非零羽毛球轨迹；
+- `before.pt`、`after.pt` 两个落点预测结果。
+
+运行 before 命令时会自动在 `before.pt` 同目录查找 `after.pt`；也可用 `--after-pose-model` 显式指定。使用 `--visualization-dir` 可修改输出目录，使用 `--no-visualization` 可关闭三维图生成。

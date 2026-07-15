@@ -1,12 +1,18 @@
-# numpy版本太高了所以要手动映射缺失的模块路径。如果你numpy版本不高可以把这块删掉！！
 from __future__ import annotations
-import sys
-import numpy.core
-# 手动映射缺失的模块路径
-sys.modules['numpy._core'] = numpy.core
-sys.modules['numpy._core.multiarray'] = numpy.core.multiarray
-sys.modules['numpy._core.umath'] = numpy.core.umath
-sys.modules['numpy._core.numerictypes'] = numpy.core.numerictypes
+
+# NumPy 2.x provides ``numpy._core`` natively. Some checkpoints created with
+# NumPy 2.x still need that path under NumPy 1.x, so only install aliases when
+# the native package is actually absent.
+try:
+    import numpy._core  # noqa: F401
+except ModuleNotFoundError:
+    import sys
+    import numpy.core as _numpy_core
+
+    sys.modules.setdefault("numpy._core", _numpy_core)
+    sys.modules.setdefault("numpy._core.multiarray", _numpy_core.multiarray)
+    sys.modules.setdefault("numpy._core.umath", _numpy_core.umath)
+    sys.modules.setdefault("numpy._core.numerictypes", _numpy_core.numerictypes)
 # ————————————————————————————————————————————————————————————————————
 
 from dataclasses import dataclass, replace
@@ -433,6 +439,7 @@ class CParameterPredictor:
             checkpoint = torch.load(
                 checkpoint_path,
                 map_location=self.device,
+                weights_only=False,
             )
         except TypeError:
             checkpoint = torch.load(checkpoint_path, map_location=self.device)
